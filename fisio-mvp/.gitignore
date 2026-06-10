@@ -1,0 +1,61 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Pastas de configuração e cache do Unity
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uilds/
+[Mm]emoryCaptures/
+[Ll]ogs/
+[Uu]serSettings/
+
+# Opcional: Se você quiser que o Git ignore os meta-arquivos (não recomendado para projetos sérios)
+# *.meta 
+
+# Pastas de cache do projeto Unity
+*.pid
+*.suo
+*.user
+*.userprefs
+*.csproj
+*.unityproj
+*.sln
+*.js.map
+*.csproj.user
+
+# Variáveis de ambiente secretas
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Arquivos de sistema
+Thumbs.db
+Thumbs.db:Zone.Identifier
+.DS_Store
+.AppleDouble
+.LSOverride
