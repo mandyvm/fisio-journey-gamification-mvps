@@ -11,10 +11,10 @@ export const MocapCamera = () => {
   // A LIGAÇÃO COM O JOGO
   // ========================================================
   const { unityProvider, sendMessage, isLoaded: isUnityLoaded } = useUnityContext({
-    loaderUrl: "/unity/Build/JogoExportado.loader.js",
-    dataUrl: "/unity/Build/JogoExportado.data",
-    frameworkUrl: "/unity/Build/JogoExportado.framework.js",
-    codeUrl: "/unity/Build/JogoExportado.wasm",
+    loaderUrl: "/unity/Joelho/Build/joelho.loader.js",
+    dataUrl: "/unity/Joelho/Build/joelho.data",
+    frameworkUrl: "/unity/Joelho/Build/joelho.framework.js",
+    codeUrl: "/unity/Joelho/Build/joelho.wasm",
   });
   
   const unityCommRef = useRef({ isLoaded: false, send: sendMessage });
@@ -27,7 +27,7 @@ export const MocapCamera = () => {
   // PARÂMETROS CLÍNICOS (ATUALIZADO COM SÉRIES E TEMPOS)
   // ========================================================
   const [configClinica, setConfigClinica] = useState({
-    ladoAtivo: "direito",
+    ladoAtivo: "esquerdo",
     repousoMax: 110,
     meta: 145,
     tolerancia: 5,
@@ -305,7 +305,7 @@ export const MocapCamera = () => {
                             }
                         } 
                         else if (anguloPerna >= metaComTolerancia) {
-                            if (estadoTemp === "CONTRAÇÃO" || estadoTemp === "REPOUSO") {
+                            if (estadoTemp === "CONTRACAO" || estadoTemp === "REPOUSO") {
                                 estadoTemp = "SUCESSO";
                                 contadorRef.current += 1;
                             } else if (estadoTemp === "SUCESSO") {
@@ -315,8 +315,8 @@ export const MocapCamera = () => {
                             }
                         }
                         else {
-                            if (estadoTemp === "REPOUSO" || estadoTemp === "CONTRAÇÃO") {
-                                estadoTemp = "CONTRAÇÃO"; 
+                            if (estadoTemp === "REPOUSO" || estadoTemp === "CONTRACAO") {
+                                estadoTemp = "CONTRACAO"; 
                             } 
                             else if (estadoTemp === "SUCESSO" || estadoTemp === "RETORNANDO" || estadoTemp === "POSTURA!") {
                                 estadoTemp = "RETORNANDO"; 
@@ -375,7 +375,7 @@ export const MocapCamera = () => {
 
   const corDoEstado = alertaPostura ? "#FF0000" : 
                       estagio === "SUCESSO" ? "#00FF00" : 
-                      estagio === "CONTRAÇÃO" ? "#FFA500" : 
+                      estagio === "CONTRACAO" ? "#FFA500" : 
                       estagio === "RETORNANDO" ? "#FFD700" : 
                       estagio === "DESCANSO" ? "#00FFFF" :
                       estagio === "FINALIZADO" ? "#00FF00" : "#FFFFFF";
