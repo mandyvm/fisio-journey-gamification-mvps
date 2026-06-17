@@ -210,14 +210,14 @@ export const MocapCamera = () => {
 
                 if (levantouMaoEsquerda || levantouMaoDireita) {
                     contadorGestoRef.current += 1;
-                    if (contadorGestoRef.current >= 40) {
+                    if (contadorGestoRef.current >= 25) {
                         exercicioIniciadoRef.current = true;
                         setExercicioIniciado(true);
                     }
                 } else {
                     contadorGestoRef.current = 0;
                 }
-                setProgressoInicio(Math.min(100, (contadorGestoRef.current / 40) * 100));
+                setProgressoInicio(Math.min(100, (contadorGestoRef.current / 25) * 100));
             }
         } 
         // LÓGICA DO EXERCÍCIO (COM CRONÓMETRO)

@@ -1,101 +1,152 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Unity, useUnityContext } from 'react-unity-webgl';
-// Imports da IA
 import { PoseLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
 
 export default function PassadaLateral() {
+  // ========================================================
+  // 1. CONFIGURAÇÕES CLÍNICAS E ESTADOS
+  // ========================================================
   const [configClinica, setConfigClinica] = useState({ 
-    metaAbertura: 30, // Agora isto representa Centímetros!
-    repsEsquerda: 5,
-    repsDireita: 5,
-    seriesTotais: 3,      // Quantas séries no total
-    descansoRep: 3,       // Segundos de descanso entre cada repetição
-    descansoSerie: 30     // Segundos de descanso ao finalizar uma série
+    metaAbertura: 35,     
+    limiteAbertura: 48,   
+    repsEsquerda: 2,
+    repsDireita: 2,
+    seriesTotais: 2,
+    descansoRep: 3,
+    descansoSerie: 10
   });
+  
   const [exercicioIniciado, setExercicioIniciado] = useState(false);
   const [menuAberto, setMenuAberto] = useState(false);
-  const [progressoInicio, setProgressoInicio] = useState(0); // Para a barra laranja do gesto
+  const [alertaPostura, setAlertaPostura] = useState(false);
 
-  // Estados do Placar Dinâmico
   const [serieAtual, setSerieAtual] = useState(1);
-  const [repsFeitasEsq, setRepsFeitasEsq] = useState(0); // Conta as da esquerda
-  const [repsFeitasDir, setRepsFeitasDir] = useState(0); // Conta as da direita
+  const [repsFeitasEsq, setRepsFeitasEsq] = useState(0); 
+  const [repsFeitasDir, setRepsFeitasDir] = useState(0); 
   const [estadoMovimento, setEstadoMovimento] = useState("REPOUSO");
-  const [distanciaAtual, setDistanciaAtual] = useState(0); // Em centímetros
+  const [distanciaAtual, setDistanciaAtual] = useState(0); 
+  
+  const [tempoDescansoVisual, setTempoDescansoVisual] = useState(0);
+  const [progressoInicio, setProgressoInicio] = useState(0); 
+  const [progressoEsq, setProgressoEsq] = useState(0);
+  const [progressoDir, setProgressoDir] = useState(0);
+  const [relatorioFinal, setRelatorioFinal] = useState<any[]>([]);
 
-  // Referências da Interface
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  // Referências do Motor de IA e Gestos
   const poseLandmarkerRef = useRef<PoseLandmarker | null>(null);
   const requestRef = useRef<number>(0);
   const tempoUltimoFrameRef = useRef<number>(-1);
-  const contadorGestoEsqRef = useRef(0); // Conta os frames da mão esquerda levantada
-  const contadorGestoDirRef = useRef(0); // Conta os frames da mão direita levantada
+  
+  const refEstadoMovimento = useRef("REPOUSO");
+  const refTempoRestante = useRef(0);
+  const refDistancia = useRef(0);
+  const refEmDescanso = useRef(false);
+  const refAlertaPostura = useRef(false);
+  const menuAbertoRef = useRef(menuAberto);
 
-  // REFS PARA A BIOMECÂNICA (FASE 3) ---
+  const contadorGestoEsqRef = useRef(0); 
+  const contadorGestoDirRef = useRef(0); 
+
   const configRef = useRef(configClinica);
   const iniciadoRef = useRef(exercicioIniciado);
   
-  // Sincroniza as variáveis de estado com as Refs para a IA conseguir ler em tempo real
+  const spotAtualEsq = useRef("CENTRO");
+  const spotAtualDir = useRef("CENTRO");
+
   useEffect(() => { configRef.current = configClinica; }, [configClinica]);
   useEffect(() => { iniciadoRef.current = exercicioIniciado; }, [exercicioIniciado]);
+  useEffect(() => { menuAbertoRef.current = menuAberto; }, [menuAberto]);
 
-  // A "Máquina de Estados" invisível que controla a repetição
-  const cicloRef = useRef({ 
-    estagio: "REPOUSO", // REPOUSO, INDO, CHEGOU, VOLTANDO
-    lado: "",           // ESQUERDA ou DIREITA
-    centroOrigemX: 0.5  // Guarda a posição inicial da bacia
-  });
+  const cicloRef = useRef({ estagio: "REPOUSO", lado: "" });
 
-  // NOVO: O "Cérebro" para contar repetições e o cronómetro de descanso de forma instantânea
   const contagemRef = useRef({
-    repsEsq: 0,
-    repsDir: 0,
-    serie: 1,
-    fimDescansoMs: 0, // Guarda em que milissegundo a pausa deve acabar
-    tipoDescanso: ""  // "REP" (Pausa curta) ou "SERIE" (Pausa longa)
+    repsEsq: 0, repsDir: 0, serie: 1, fimDescansoMs: 0, tipoDescanso: "",
+    repAtualExcedeu: false, repAtualCompensou: false,
+    historico: [ { serie: 1, corretas: 0, incorretas: 0, compensacoes: 0 } ]
   });
 
-  // Para garantir que enviamos mensagens para a Unity sem bugs de renderização
-  const { unityProvider, sendMessage, isLoaded } = useUnityContext({
-    loaderUrl: "/unity/Joelho/Build/joelho.loader.js", // Mantenha ou ajuste o caminho conforme o seu projeto
-    dataUrl: "/unity/Joelho/Build/joelho.data",
-    frameworkUrl: "/unity/Joelho/Build/joelho.framework.js",
-    codeUrl: "/unity/Joelho/Build/joelho.wasm",
-  });
-  
-  const unityCommRef = useRef({ isLoaded: false, send: sendMessage });
-  
-  useEffect(() => {
-    unityCommRef.current = { isLoaded, send: sendMessage };
-  }, [isLoaded, sendMessage]);
+  // ========================================================
+  // 2. FUNÇÃO CENTRAL DE PONTUAÇÃO
+  // ========================================================
+  const contabilizarRepeticao = () => {
+    const histAtual = contagemRef.current.historico[contagemRef.current.serie - 1];
+    
+    // Contabiliza Acertos vs Distância Excedida
+    if (contagemRef.current.repAtualExcedeu) histAtual.incorretas++; else histAtual.corretas++;
+    
+    // Contabiliza ERRO DE POSTURA (Se a flag foi ativada durante a repetição)
+    if (contagemRef.current.repAtualCompensou) histAtual.compensacoes++;
 
-  // Função para lidar com a digitação nos inputs
-  const handleConfigChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, value } = e.target;
-    setConfigClinica({
-      ...configClinica,
-      [name]: value === '' ? '' : Number(value)
-    });
+    // Zera as flags para a próxima repetição
+    contagemRef.current.repAtualExcedeu = false; 
+    contagemRef.current.repAtualCompensou = false;
+
+    // Atualiza placar
+    if (cicloRef.current.lado === "DIREITA") {
+        contagemRef.current.repsDir++; setRepsFeitasDir(contagemRef.current.repsDir);
+    } else {
+        contagemRef.current.repsEsq++; setRepsFeitasEsq(contagemRef.current.repsEsq);
+    }
+
+    const totalFeitas = contagemRef.current.repsEsq + contagemRef.current.repsDir;
+    const totalMeta = configRef.current.repsEsquerda + configRef.current.repsDireita;
+
+    // Verifica se terminou a série
+    if (totalFeitas >= totalMeta) {
+        if (contagemRef.current.serie < configRef.current.seriesTotais) {
+            cicloRef.current.estagio = "DESCANSO"; contagemRef.current.tipoDescanso = "SERIE";
+            contagemRef.current.fimDescansoMs = performance.now() + (configRef.current.descansoSerie * 1000);
+        } else {
+            cicloRef.current.estagio = "FINALIZADO"; refEstadoMovimento.current = "TREINO CONCLUÍDO!";
+            setEstadoMovimento("TREINO CONCLUÍDO!"); setRelatorioFinal([...contagemRef.current.historico]); 
+        }
+    } else {
+        cicloRef.current.estagio = "DESCANSO"; contagemRef.current.tipoDescanso = "REP";
+        contagemRef.current.fimDescansoMs = performance.now() + (configRef.current.descansoRep * 1000);
+    }
   };
 
-  // ==========================================
-  // MOTOR DE VISÃO COMPUTACIONAL E BIOMECÂNICA
-  // ==========================================
+  // ========================================================
+  // 3. BUILD DA UNITY E OUVINTE DO TAPETE
+  // ========================================================
+  const { unityProvider, sendMessage, isLoaded, addEventListener, removeEventListener } = useUnityContext({
+    loaderUrl: "/unity/PassadaLateral/Build/passadaLateral.loader.js", 
+    dataUrl: "/unity/PassadaLateral/Build/passadaLateral.data",
+    frameworkUrl: "/unity/PassadaLateral/Build/passadaLateral.framework.js",
+    codeUrl: "/unity/PassadaLateral/Build/passadaLateral.wasm",
+  });
+
+  useEffect(() => {
+    const handleUnityPoint = (dataString: string) => {
+        const [peName, spotName] = dataString.split(',');
+        if (peName === "PE_ESQUERDO") spotAtualEsq.current = spotName;
+        if (peName === "PE_DIREITO") spotAtualDir.current = spotName;
+    };
+
+    addEventListener("PontoMarcado", handleUnityPoint as any);
+    return () => { removeEventListener("PontoMarcado", handleUnityPoint as any); };
+  }, [addEventListener, removeEventListener]);
+  
+  const unityCommRef = useRef({ isLoaded: false, send: sendMessage });
+  useEffect(() => { unityCommRef.current = { isLoaded, send: sendMessage }; }, [isLoaded, sendMessage]);
+
+  const handleConfigChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    setConfigClinica({ ...configClinica, [name]: value === '' ? '' : Number(value) });
+  };
+
+  // ========================================================
+  // 4. IA MEDIAPIPE E LOOP DE 60FPS
+  // ========================================================
   useEffect(() => {
     let landmarkerObj: PoseLandmarker;
 
     const carregarIA = async () => {
       const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
       landmarkerObj = await PoseLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`,
-          delegate: "GPU"
-        },
-        runningMode: "VIDEO",
-        numPoses: 1
+        baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`, delegate: "GPU" },
+        runningMode: "VIDEO", numPoses: 1
       });
       poseLandmarkerRef.current = landmarkerObj;
       iniciarCamera();
@@ -106,31 +157,17 @@ export default function PassadaLateral() {
         .then((stream) => {
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
-            videoRef.current.onloadedmetadata = () => {
-              videoRef.current?.play();
-              preverFrames();
-            };
+            videoRef.current.onloadedmetadata = () => { videoRef.current?.play(); preverFrames(); };
           }
         });
     };
 
     const preverFrames = () => {
       if (!videoRef.current || !canvasRef.current || !poseLandmarkerRef.current) return;
+      const video = videoRef.current; const canvas = canvasRef.current; const ctx = canvas.getContext("2d");
 
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d");
-
-      // TRAVA DE SEGURANÇA ANTI-CRASH
-      if (video.videoWidth === 0 || video.videoHeight === 0) {
-        requestRef.current = requestAnimationFrame(preverFrames);
-        return;
-      }
-
-      if (canvas.width !== video.videoWidth) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-      }
+      if (video.videoWidth === 0) { requestRef.current = requestAnimationFrame(preverFrames); return; }
+      if (canvas.width !== video.videoWidth) { canvas.width = video.videoWidth; canvas.height = video.videoHeight; }
 
       let startTimeMs = performance.now();
       if (startTimeMs !== tempoUltimoFrameRef.current) {
@@ -138,199 +175,161 @@ export default function PassadaLateral() {
         const resultados = poseLandmarkerRef.current.detectForVideo(video, startTimeMs);
 
         if (ctx) {
-          ctx.save();
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          ctx.save(); ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
           
-          // NOVO: Exige os landmarks em 2D (ecrã) e em 3D (mundo real)
           if (resultados.landmarks && resultados.landmarks[0] && resultados.worldLandmarks && resultados.worldLandmarks[0]) {
-            const esqueleto = resultados.landmarks[0];
-            const esqueletoMundo = resultados.worldLandmarks[0]; // Dados em metros 3D
+            const esqueleto = resultados.landmarks[0]; const esqueletoMundo = resultados.worldLandmarks[0]; 
             const utils = new DrawingUtils(ctx);
-            
-            // Desenha o esqueleto a verde
             utils.drawConnectors(esqueleto, PoseLandmarker.POSE_CONNECTIONS, { color: "#00FF00", lineWidth: 3 });
             utils.drawLandmarks(esqueleto, { color: "#FF0000", radius: 4 });
 
-            // ==========================================
-            // 1. A FÍSICA E BIOMECÂNICA DA PASSADA
-            // ==========================================
-            const quadrilEsq = esqueleto[23];
-            const quadrilDir = esqueleto[24];
-            const tornozeloEsq = esqueleto[27];
-            const tornozeloDir = esqueleto[28];
-            const ombroEsq = esqueleto[11];
-            const ombroDir = esqueleto[12];
+            const quadrilEsq = esqueleto[23]; const quadrilDir = esqueleto[24];
+            const tornozeloEsq = esqueleto[27]; const tornozeloDir = esqueleto[28];
+            const ombroEsq = esqueleto[11]; const ombroDir = esqueleto[12];
             
-            // Exige a visibilidade de ambos os tornozelos para evitar falhas!
             if (quadrilEsq.visibility > 0.5 && quadrilDir.visibility > 0.5 && tornozeloEsq.visibility > 0.5 && tornozeloDir.visibility > 0.5) {
-                
                 const centroDeMassaX = (quadrilEsq.x + quadrilDir.x) / 2;
-                // A comunicação com a Unity não terá efeito visual até a Fase 4
+                
                 if (unityCommRef.current.isLoaded) {
                     unityCommRef.current.send("ReceptorReact", "ReceberPosicaoXDoReact", centroDeMassaX);
+                    const dadosPes = `${tornozeloEsq.x.toFixed(4)},${tornozeloDir.x.toFixed(4)}`;
+                    unityCommRef.current.send("ReceptorReact", "ReceberPesDoReact", dadosPes);
                 }
 
-                if (iniciadoRef.current) {
-                    // CÁLCULO 3D EM CENTÍMETROS
-                    const tornozeloEsqMundo = esqueletoMundo[27];
-                    const tornozeloDirMundo = esqueletoMundo[28];
+                if (iniciadoRef.current && !menuAbertoRef.current) {
+                    const dx = esqueletoMundo[27].x - esqueletoMundo[28].x; const dy = esqueletoMundo[27].y - esqueletoMundo[28].y; const dz = esqueletoMundo[27].z - esqueletoMundo[28].z;
+                    const distanciaCm = Math.round(Math.sqrt(dx*dx + dy*dy + dz*dz) * 100);
                     
-                    const dx = tornozeloEsqMundo.x - tornozeloDirMundo.x;
-                    const dy = tornozeloEsqMundo.y - tornozeloDirMundo.y;
-                    const dz = tornozeloEsqMundo.z - tornozeloDirMundo.z;
+                    if (distanciaCm !== refDistancia.current) {
+                        refDistancia.current = distanciaCm; setDistanciaAtual(distanciaCm);
+                    }
                     
-                    const distanciaMetros = Math.sqrt(dx*dx + dy*dy + dz*dz);
-                    const distanciaCm = Math.round(distanciaMetros * 100);
-                    
-                    setDistanciaAtual(distanciaCm); // Exibe o valor em CM na tela
-                    
-                    const centroOmbrosX = (ombroEsq.x + ombroDir.x) / 2;
-                    const compensacaoTronco = Math.abs(centroOmbrosX - centroDeMassaX) * 100;
-                    
-                    if (compensacaoTronco > 12) {
-                        setEstadoMovimento("POSTURA!");
-                    } else {
+                    let estagioFisica = cicloRef.current.estagio;
+                    let novoEstadoVis = refEstadoMovimento.current;
 
-                        const metaCm = configRef.current.metaAbertura;
-                        let estagioAtual = cicloRef.current.estagio;
+                    const spotEsq = spotAtualEsq.current;
+                    const spotDir = spotAtualDir.current;
+
+                    // 1. LÓGICA DE DESCANSO
+                    if (estagioFisica === "DESCANSO") {
+                        if (refAlertaPostura.current) { refAlertaPostura.current = false; setAlertaPostura(false); } 
+                        if (!refEmDescanso.current) { refEmDescanso.current = true; } 
+
+                        const tempoRest = Math.ceil((contagemRef.current.fimDescansoMs - performance.now()) / 1000);
                         
-                        // FLUXO DE ESTADOS (A Lógica do Vai e Vem)
-                        if (estagioAtual === "REPOUSO") {
-                            // Pés juntos anatomicamente rondam os 10~20cm
-                            if (distanciaCm < 22) {
-                                // Pés juntos: calibra onde é o "Centro" do paciente
-                                cicloRef.current.centroOrigemX = centroDeMassaX; 
-                                setEstadoMovimento("REPOUSO");
-                            } 
-                            else if (distanciaCm >= metaCm) {
-                                // Pés afastados além da meta: O movimento começou!
-                                cicloRef.current.estagio = "INDO";
-                                // Verifica para que lado a bacia se moveu em relação à origem
-                                cicloRef.current.lado = (centroDeMassaX < cicloRef.current.centroOrigemX) ? "DIREITA" : "ESQUERDA";
-                                setEstadoMovimento(`ABRINDO (${cicloRef.current.lado})`);
+                        if (tempoRest > 0) {
+                            if (tempoRest !== refTempoRestante.current) {
+                                refTempoRestante.current = tempoRest; setTempoDescansoVisual(tempoRest);
                             }
-                        } 
-                        else if (estagioAtual === "INDO") {
-                            if (distanciaCm < 22) { 
-                                // Juntou os pés no destino
-                                cicloRef.current.estagio = "CHEGOU";
-                                setEstadoMovimento("NO DESTINO");
+                            novoEstadoVis = contagemRef.current.tipoDescanso === "SERIE" ? `PAUSA SÉRIE: ${tempoRest}S` : `PAUSA: ${tempoRest}S`;
+                        } else {
+                            if (contagemRef.current.tipoDescanso === "SERIE") {
+                                contagemRef.current.repsEsq = 0; contagemRef.current.repsDir = 0; contagemRef.current.serie++;
+                                contagemRef.current.historico.push({ serie: contagemRef.current.serie, corretas: 0, incorretas: 0, compensacoes: 0 });
+                                setRepsFeitasEsq(0); setRepsFeitasDir(0); setSerieAtual(contagemRef.current.serie);
+                            }
+                            cicloRef.current.estagio = "REPOUSO"; novoEstadoVis = "REPOUSO";
+                            refEmDescanso.current = false; 
+                        }
+                    }
+                    else if (estagioFisica === "FINALIZADO") {
+                        novoEstadoVis = "TREINO CONCLUÍDO!";
+                        if (refAlertaPostura.current) { refAlertaPostura.current = false; setAlertaPostura(false); }
+                        refEmDescanso.current = false;
+                    }
+                    // 2. MÁQUINA DE ESTADOS (TOTALMENTE DESBLOQUEADA)
+                    else {
+                        refEmDescanso.current = false; 
+                        
+                        // VERIFICAÇÃO DE POSTURA E DISTÂNCIA MÁXIMA
+                        const centroOmbrosX = (ombroEsq.x + ombroDir.x) / 2;
+                        const compensacaoTronco = Math.abs(centroOmbrosX - centroDeMassaX) * 100;
+
+                        if (estagioFisica !== "REPOUSO") {
+                            if (distanciaCm > configRef.current.limiteAbertura) contagemRef.current.repAtualExcedeu = true;
+                            // Se desviar mais de 4cm do eixo, marca penalidade no relatório!
+                            if (compensacaoTronco > 4) contagemRef.current.repAtualCompensou = true;
+                        }
+
+                        // LIGA/DESLIGA AVISO VISUAL NA TELA
+                        if (compensacaoTronco > 4) {
+                            if (!refAlertaPostura.current) { refAlertaPostura.current = true; setAlertaPostura(true); }
+                        } else {
+                            if (refAlertaPostura.current) { refAlertaPostura.current = false; setAlertaPostura(false); }
+                        }
+
+                        // TRANSIÇÃO DE ESTADOS DA REPETIÇÃO
+                        if (estagioFisica === "REPOUSO") {
+                            novoEstadoVis = refAlertaPostura.current ? "POSTURA!" : "REPOUSO";
+                            if (spotEsq === "ESQUERDO") {
+                                cicloRef.current.lado = "ESQUERDA"; cicloRef.current.estagio = "CHEGOU"; novoEstadoVis = "NO DESTINO";
+                            } else if (spotDir === "DIREITO") {
+                                cicloRef.current.lado = "DIREITA"; cicloRef.current.estagio = "CHEGOU"; novoEstadoVis = "NO DESTINO";
                             }
                         }
-                        else if (estagioAtual === "CHEGOU") {
-                            if (distanciaCm >= metaCm) { 
-                                // Abriu a perna para voltar ao centro
-                                cicloRef.current.estagio = "VOLTANDO";
-                                setEstadoMovimento("RETORNANDO");
+                        else if (estagioFisica === "CHEGOU") {
+                            novoEstadoVis = refAlertaPostura.current ? "POSTURA!" : "NO DESTINO";
+                            if (cicloRef.current.lado === "ESQUERDA" && spotEsq !== "ESQUERDO") {
+                                cicloRef.current.estagio = "VOLTANDO"; novoEstadoVis = "RETORNANDO";
+                            } else if (cicloRef.current.lado === "DIREITA" && spotDir !== "DIREITO") {
+                                cicloRef.current.estagio = "VOLTANDO"; novoEstadoVis = "RETORNANDO";
                             }
                         }
-                        else if (estagioAtual === "VOLTANDO") {
-                            if (distanciaCm < 22) { 
-                                // 1. MARCA O PONTO!
-                                let repsEsqAtual = contagemRef.current.repsEsq;
-                                let repsDirAtual = contagemRef.current.repsDir;
-
-                                if (cicloRef.current.lado === "DIREITA") {
-                                    repsDirAtual++;
-                                    contagemRef.current.repsDir = repsDirAtual;
-                                    setRepsFeitasDir(repsDirAtual);
-                                } else {
-                                    repsEsqAtual++;
-                                    contagemRef.current.repsEsq = repsEsqAtual;
-                                    setRepsFeitasEsq(repsEsqAtual);
-                                }
-
-                                // 2. VERIFICA SE A SÉRIE ACABOU
-                                const totalRepsMeta = configRef.current.repsEsquerda + configRef.current.repsDireita;
-                                const totalRepsFeitas = repsEsqAtual + repsDirAtual;
-
-                                if (totalRepsFeitas >= totalRepsMeta) {
-                                    // SÉRIE CONCLUÍDA!
-                                    if (contagemRef.current.serie < configRef.current.seriesTotais) {
-                                        cicloRef.current.estagio = "DESCANSO";
-                                        contagemRef.current.tipoDescanso = "SERIE";
-                                        contagemRef.current.fimDescansoMs = performance.now() + (configRef.current.descansoSerie * 1000);
-                                    } else {
-                                        // FIM DO TREINO
-                                        cicloRef.current.estagio = "FINALIZADO";
-                                        setEstadoMovimento("TREINO CONCLUÍDO!");
-                                    }
-                                } else {
-                                    // APENAS MAIS UMA REPETIÇÃO
-                                    cicloRef.current.estagio = "DESCANSO";
-                                    contagemRef.current.tipoDescanso = "REP";
-                                    contagemRef.current.fimDescansoMs = performance.now() + (configRef.current.descansoRep * 1000);
-                                }
+                        else if (estagioFisica === "VOLTANDO") {
+                            novoEstadoVis = refAlertaPostura.current ? "POSTURA!" : "RETORNANDO";
+                            // Marca ponto se AMBOS os pés baterem no centro OU a distância entre eles for <= 24cm
+                            if ((spotEsq === "CENTRO" && spotDir === "CENTRO") || distanciaCm <= 24) {
+                                contabilizarRepeticao();
                             }
                         }
-                        // NOVO ESTADO: O CRONÓMETRO DE DESCANSO
-                        else if (estagioAtual === "DESCANSO") {
-                            // Calcula quantos segundos faltam
-                            const tempoRestante = Math.ceil((contagemRef.current.fimDescansoMs - performance.now()) / 1000);
+                    }
 
-                            if (tempoRestante > 0) {
-                                // Atualiza o placar com a contagem regressiva
-                                if (contagemRef.current.tipoDescanso === "SERIE") {
-                                    setEstadoMovimento(`PAUSA SÉRIE: ${tempoRestante}s`);
-                                } else {
-                                    setEstadoMovimento(`PAUSA: ${tempoRestante}s`);
-                                }
-                            } else {
-                                // O DESCANSO ACABOU!
-                                if (contagemRef.current.tipoDescanso === "SERIE") {
-                                    // Zera os contadores e vai para a próxima série
-                                    contagemRef.current.repsEsq = 0;
-                                    contagemRef.current.repsDir = 0;
-                                    contagemRef.current.serie++;
-                                    
-                                    setRepsFeitasEsq(0);
-                                    setRepsFeitasDir(0);
-                                    setSerieAtual(contagemRef.current.serie);
-                                }
-                                
-                                // Libera para a próxima passada
-                                cicloRef.current.estagio = "REPOUSO";
-                                setEstadoMovimento("REPOUSO");
-                            }
-                        }
+                    if (novoEstadoVis !== refEstadoMovimento.current) {
+                        refEstadoMovimento.current = novoEstadoVis; setEstadoMovimento(novoEstadoVis);
                     }
                 }
             }
 
-            // 2. OS GESTOS 
-            const pulsoEsq = esqueleto[15];
-            const pulsoDir = esqueleto[16];
+            // GESTOS DE MÃO PARA NAVEGAÇÃO
+            const pulsoEsq = esqueleto[15]; const pulsoDir = esqueleto[16];
+            const maoEsqLevantada = pulsoEsq.visibility > 0.6 && pulsoEsq.y < ombroEsq.y;
+            const maoDirLevantada = pulsoDir.visibility > 0.6 && pulsoDir.y < ombroDir.y;
 
-            // LÓGICA MÃO ESQUERDA (INICIAR) 
-            setExercicioIniciado((iniciadoAtual) => {
-              if (!iniciadoAtual && pulsoEsq.y < ombroEsq.y) {
-                contadorGestoEsqRef.current += 1;
-                setProgressoInicio((contadorGestoEsqRef.current / 40) * 100);
+            if (menuAbertoRef.current) {
+                if (maoEsqLevantada) {
+                    contadorGestoEsqRef.current += 1; setProgressoEsq((contadorGestoEsqRef.current / 5) * 100);
+                    if (contadorGestoEsqRef.current >= 5) { setMenuAberto(false); contadorGestoEsqRef.current = 0; setProgressoEsq(0); }
+                } else { contadorGestoEsqRef.current = 0; setProgressoEsq(0); }
                 
-                if (contadorGestoEsqRef.current >= 40) {
-                  return true; // Aciona o Início
-                }
-              } else if (!iniciadoAtual) {
-                contadorGestoEsqRef.current = 0;
-                setProgressoInicio(0);
-              }
-              return iniciadoAtual;
-            });
+                if (maoDirLevantada) {
+                    contadorGestoDirRef.current += 1; setProgressoDir((contadorGestoDirRef.current / 5) * 100);
+                    if (contadorGestoDirRef.current >= 5) { window.location.reload(); }
+                } else { contadorGestoDirRef.current = 0; setProgressoDir(0); }
+            }
+            else if (refEmDescanso.current) {
+                if (maoEsqLevantada) {
+                    contadorGestoEsqRef.current += 1; setProgressoEsq((contadorGestoEsqRef.current / 10) * 100);
+                    if (contadorGestoEsqRef.current >= 10) {
+                        const tempoAdd = contagemRef.current.tipoDescanso === "SERIE" ? configRef.current.descansoSerie : configRef.current.descansoRep;
+                        contagemRef.current.fimDescansoMs = performance.now() + (tempoAdd * 1000); 
+                        contadorGestoEsqRef.current = 0; setProgressoEsq(0);
+                    }
+                } else { contadorGestoEsqRef.current = 0; setProgressoEsq(0); }
+                contadorGestoDirRef.current = 0; setProgressoDir(0); 
+            } 
+            else if (!iniciadoRef.current) {
+                if (maoEsqLevantada) {
+                    contadorGestoEsqRef.current += 1; setProgressoInicio((contadorGestoEsqRef.current / 20) * 100);
+                    if (contadorGestoEsqRef.current >= 20) { setExercicioIniciado(true); contadorGestoEsqRef.current = 0; setProgressoInicio(0); }
+                } else { contadorGestoEsqRef.current = 0; setProgressoInicio(0); }
+            } 
+            else {
+                if (maoDirLevantada && cicloRef.current.estagio !== "FINALIZADO") {
+                    contadorGestoDirRef.current += 1; setProgressoDir((contadorGestoDirRef.current / 25) * 100);
+                    if (contadorGestoDirRef.current >= 25) { setMenuAberto(true); contadorGestoDirRef.current = 0; setProgressoDir(0); }
+                } else { contadorGestoDirRef.current = 0; setProgressoDir(0); }
+            }
 
-            // LÓGICA MÃO DIREITA (PAUSAR) 
-            setExercicioIniciado((iniciadoAtual) => {
-              if (iniciadoAtual && pulsoDir.y < ombroDir.y) {
-                contadorGestoDirRef.current += 1;
-                if (contadorGestoDirRef.current >= 30) {
-                  setMenuAberto(true); // Abre a tela preta de Pause
-                  contadorGestoDirRef.current = 0; // Zera para não abrir em loop
-                }
-              } else {
-                contadorGestoDirRef.current = 0;
-              }
-              return iniciadoAtual;
-            });
           }
           ctx.restore();
         }
@@ -339,285 +338,208 @@ export default function PassadaLateral() {
     };
 
     carregarIA();
-
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
       if (landmarkerObj) landmarkerObj.close();
     };
   }, []);
 
+  const isResting = refEmDescanso.current;
+
   return (
-    <div style={{ width: '100vw', height: '100vh', position: 'relative', backgroundColor: '#1a1a1a', overflow: 'hidden' }}>
+    <div style={{ width: '100vw', height: '100vh', position: 'relative', backgroundColor: '#1a1a1a', overflow: 'hidden'}}>
       
-      {/* ========================================== */}
-      {/* CAMADA 1: UNITY EM TELA CHEIA (FUNDO)      */}
-      {/* ========================================== */}
+      {/* BACKGROUND (UNITY) */}
       <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 1 }}>
         <Unity unityProvider={unityProvider} style={{ width: '100%', height: '100%' }} />
       </div>
 
-      {/* ========================================== */}
-      {/* CAMADA 2: PICTURE-IN-PICTURE (PACIENTE)    */}
-      {/* ========================================== */}
-      <div style={{ 
-          position: 'absolute', 
-          top: '20px', 
-          right: '20px', 
-          width: '240px',   // Reduzido
-          height: '180px',  // Reduzido
-          zIndex: 10, 
-          backgroundColor: '#000',
-          borderRadius: '12px', 
-          border: '3px solid #ea580c',
-          boxShadow: '0 10px 25px rgba(0,0,0,0.5)',
-          overflow: 'hidden'
-      }}>
+      {/* PIP (CÂMERA) */}
+      <div style={{ position: 'absolute', top: '20px', right: '20px', width: '240px', height: '180px', zIndex: 10, backgroundColor: '#000', borderRadius: '12px', border: '3px solid #67B5A2', boxShadow: '0 10px 25px #444E4D', overflow: 'hidden' }}>
           <video ref={videoRef} autoPlay playsInline style={{ display: 'none' }} />
           <canvas ref={canvasRef} style={{ width: '100%', height: '100%', transform: 'scaleX(-1)' }} />
-          
-          {/* Etiqueta na câmara */}
-          <div style={{ position: 'absolute', bottom: '5px', left: '10px', color: 'white', fontSize: '12px', fontWeight: 'bold', textShadow: '1px 1px 2px black' }}>
-            Câmara do Paciente
-          </div>
+          <div style={{ position: 'absolute', bottom: '5px', left: '10px', color: 'white', fontSize: '12px', fontWeight: 'bold', textShadow: '1px 1px 2px black' }}>Câmera</div>
       </div>
 
-      {/* ========================================== */}
-      {/* CAMADA 3: PAINEL CLÍNICO E HUD             */}
-      {/* ========================================== */}
-      <div style={{ 
-          position: 'absolute', 
-          top: '20px', 
-          left: '20px', 
-          width: '300px', 
-          zIndex: 10, 
-          display: 'flex', 
-          flexDirection: 'column', 
-          gap: '15px' 
-      }}>
-        
-        {/* Caixa de Ajustes Clínicos */}
-        <div style={{ backgroundColor: 'rgba(255, 255, 255, 0.95)', padding: '20px', borderRadius: '12px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}>
-          <h3 style={{ marginTop: 0, color: '#333', fontSize: '1.2rem' }}>Ajuste Clínico (Passada)</h3>
+      {/* PAINEL CLÍNICO ESQUERDO */}
+      <div style={{ position: 'absolute', top: '20px', left: '20px', width: '280px', zIndex: 10 }}>
+        <div style={{ backgroundColor: 'rgba(255, 255, 255, 0.95)', padding: '15px 20px', borderRadius: '12px', boxShadow: '0 4px 15px #444E4D' }}>
+          <h3 style={{ margin: '0 0 15px 0', color: '#333', fontSize: '1.2rem', textAlign: 'center', borderBottom: '2px solid #67B5A2', paddingBottom: '8px' }}>Ajuste Clínico Configurado</h3>
           
-          {/* Meta de Abertura */}
-          <div style={{ marginBottom: '10px' }}>
-            <label style={{ display: 'block', fontSize: '14px', color: '#666', marginBottom: '5px' }}>
-              Meta de Abertura (cm):
-            </label>
-            <input 
-              type="number" 
-              name="metaAbertura" 
-              value={configClinica.metaAbertura} 
-              onChange={handleConfigChange}
-              disabled={exercicioIniciado}
-              style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ccc' }}
-            />
-          </div>
-
-         {/* Inputs Divididos Lado a Lado (Corrigido) */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
-            <div style={{ width: '48%' }}>
-              <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '5px' }}>
-                Reps Esq:
-              </label>
-              <input 
-                type="number" 
-                name="repsEsquerda" 
-                value={configClinica.repsEsquerda} 
-                onChange={handleConfigChange} 
-                disabled={exercicioIniciado} 
-                style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} 
-              />
+          <div style={{ display: 'flex', gap: '10px', marginBottom: '8px' }}>
+            <div style={{ flex: 1 }}>
+              <label style={{ display: 'block', fontSize: '11px', color: '#666', marginBottom: '3px', fontWeight: 'bold' }}>Meta Abert. (cm)</label>
+              <input type="number" name="metaAbertura" value={configClinica.metaAbertura} onChange={handleConfigChange} disabled={exercicioIniciado} style={{ width: '100%', padding: '6px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} />
             </div>
-            
-            <div style={{ width: '48%' }}>
-              <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '5px' }}>
-                Reps Dir:
-              </label>
-              <input 
-                type="number" 
-                name="repsDireita" 
-                value={configClinica.repsDireita} 
-                onChange={handleConfigChange} 
-                disabled={exercicioIniciado} 
-                style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} 
-              />
-            </div>
-          </div>
-          
-          <small style={{ display: 'block', color: '#888', fontSize: '11px', marginBottom: '15px', textAlign: 'center' }}>
-            Total da Série: {configClinica.repsEsquerda + configClinica.repsDireita} repetições
-          </small>
-
-          {/* NOVO BLOCO: Séries e Descansos */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
-            <div style={{ width: '48%' }}>
-              <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '5px' }}>
-                Séries Totais:
-              </label>
-              <input 
-                type="number" 
-                name="seriesTotais" 
-                value={configClinica.seriesTotais} 
-                onChange={handleConfigChange} 
-                disabled={exercicioIniciado} 
-                style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} 
-              />
-            </div>
-            
-            <div style={{ width: '48%' }}>
-              <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '5px' }}>
-                Pausa Série (s):
-              </label>
-              <input 
-                type="number" 
-                name="descansoSerie" 
-                value={configClinica.descansoSerie} 
-                onChange={handleConfigChange} 
-                disabled={exercicioIniciado} 
-                style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} 
-              />
+            <div style={{ flex: 1 }}>
+              <label style={{ display: 'block', fontSize: '11px', color: '#ef4444', marginBottom: '3px', fontWeight: 'bold' }}>Limite Máx (cm)</label>
+              <input type="number" name="limiteAbertura" value={configClinica.limiteAbertura} onChange={handleConfigChange} disabled={exercicioIniciado} style={{ width: '100%', padding: '6px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} />
             </div>
           </div>
 
-          <div style={{ marginBottom: '15px' }}>
-            <label style={{ display: 'block', fontSize: '13px', color: '#666', marginBottom: '5px' }}>
-              Pausa entre Repetições (s):
-            </label>
-            <input 
-              type="number" 
-              name="descansoRep" 
-              value={configClinica.descansoRep} 
-              onChange={handleConfigChange}
-              disabled={exercicioIniciado}
-              style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }}
-            />
+          <div style={{ display: 'flex', gap: '10px', marginBottom: '8px' }}>
+            <div style={{ flex: 1 }}>
+              <label style={{ display: 'block', fontSize: '11px', color: '#666', marginBottom: '3px', fontWeight: 'bold' }}>Reps Esq:</label>
+              <input type="number" name="repsEsquerda" value={configClinica.repsEsquerda} onChange={handleConfigChange} disabled={exercicioIniciado} style={{ width: '100%', padding: '6px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={{ display: 'block', fontSize: '11px', color: '#666', marginBottom: '3px', fontWeight: 'bold' }}>Reps Dir:</label>
+              <input type="number" name="repsDireita" value={configClinica.repsDireita} onChange={handleConfigChange} disabled={exercicioIniciado} style={{ width: '100%', padding: '6px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} />
+            </div>
           </div>
 
-          {!exercicioIniciado && (
-            <button 
-              onClick={() => setExercicioIniciado(true)}
-              style={{ width: '100%', padding: '10px', backgroundColor: '#ea580c', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', marginTop: '10px' }}
-            >
-              Iniciar Exercício
-            </button>
-          )}
+          <div style={{ display: 'flex', gap: '10px', marginBottom: '8px' }}>
+            <div style={{ flex: 1 }}>
+              <label style={{ display: 'block', fontSize: '11px', color: '#666', marginBottom: '3px', fontWeight: 'bold' }}>Séries Totais:</label>
+              <input type="number" name="seriesTotais" value={configClinica.seriesTotais} onChange={handleConfigChange} disabled={exercicioIniciado} style={{ width: '100%', padding: '6px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={{ display: 'block', fontSize: '11px', color: '#666', marginBottom: '3px', fontWeight: 'bold' }}>Pausa Série (s):</label>
+              <input type="number" name="descansoSerie" value={configClinica.descansoSerie} onChange={handleConfigChange} disabled={exercicioIniciado} style={{ width: '100%', padding: '6px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} />
+            </div>
+          </div>
 
-          {/* Feedback Visual do Gesto (Mão Esquerda) */}
-          {!exercicioIniciado && progressoInicio > 0 && (
-             <div style={{ marginTop: '10px', width: '100%', height: '10px', backgroundColor: '#ddd', borderRadius: '5px', overflow: 'hidden' }}>
-               <div style={{ width: `${Math.min(progressoInicio, 100)}%`, height: '100%', backgroundColor: '#ea580c', transition: 'width 0.1s linear' }} />
-             </div>
-          )}
+          <div style={{ marginBottom: '5px' }}>
+            <label style={{ display: 'block', fontSize: '11px', color: '#666', marginBottom: '3px', fontWeight: 'bold' }}>Pausa entre Repetições (s):</label>
+            <input type="number" name="descansoRep" value={configClinica.descansoRep} onChange={handleConfigChange} disabled={exercicioIniciado} style={{ width: '100%', padding: '6px', borderRadius: '4px', border: '1px solid #ccc', boxSizing: 'border-box' }} />
+          </div>
         </div>
-
-        {/* Placar (HUD) entrará aqui depois */}
       </div>
       
-      {/* ========================================== */}
-      {/* CAMADA 3.5: PLACAR DINÂMICO CENTRAL (HUD)  */}
-      {/* ========================================== */}
+      {/* ALERTA GIGANTE DE POSTURA */}
+      {alertaPostura && !isResting && !menuAberto && (
+        <div style={{ position: 'absolute', top: '25%', left: '50%', transform: 'translate(-50%, -50%)', backgroundColor: '#ef4444', padding: '15px 40px', borderRadius: '20px', border: '4px solid white', zIndex: 45, display: 'flex', alignItems: 'center', gap: '20px', boxShadow: '0 15px 30px rgba(239,68,68,0.6)' }}>
+            <span style={{ fontSize: '60px' }}>⚠️</span>
+            <div>
+                <h1 style={{ color: 'white', margin: 0, fontSize: '1.5rem', textTransform: 'uppercase', letterSpacing: '1px' }}>Tome cuidado com o Tronco!</h1>
+                <p style={{ color: 'white', margin: '5px 0 0 0', fontSize: '1.2rem', fontWeight: 'bold' }}>Mantenha a coluna reta, mantendo sempre a postura.</p>
+            </div>
+        </div>
+      )}
+
+      {/* HUD TOPO */}
       {exercicioIniciado && (
-        <div style={{ 
-            position: 'absolute', 
-            top: '15px', 
-            left: '50%', 
-            transform: 'translateX(-50%)', 
-            width: '540px', // Um pouco mais largo para caber tudo numa linha
-            backgroundColor: 'rgba(0, 0, 0, 0.85)', 
-            padding: '10px 20px', // Altura reduzida
-            borderRadius: '12px', 
-            border: '2px solid #ea580c',
-            color: 'white',
-            display: 'flex', 
-            flexDirection: 'column', 
-            zIndex: 20,
-            boxShadow: '0 10px 25px rgba(0,0,0,0.5)',
-            backdropFilter: 'blur(4px)'
-        }}>
-          {/* Informações de Texto Alinhadas */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+        <div style={{ position: 'absolute', top: '15px', left: '50%', transform: 'translateX(-50%)', zIndex: 20, backgroundColor: 'rgba(26, 26, 26, 0.95)', padding: '15px 35px', borderRadius: '15px', border: '3px solid #67B5A2', display: 'flex', gap: '30px', boxShadow: '0 10px 20px #444E4D' }}>
+            <div style={{ borderRight: '1px solid rgba(255,255,255,0.2)', paddingRight: '25px', textAlign: 'center' }}>
+                <div style={{ color: '#aaa', fontSize: '12px', fontWeight: 'bold', letterSpacing: '1px' }}>SÉRIE</div>
+                <div style={{ color: 'white', fontSize: '36px', fontWeight: 'bold' }}>{serieAtual} <span style={{fontSize:'18px', color:'#888'}}>/ {configClinica.seriesTotais}</span></div>
+            </div>
             
-            {/* LADO ESQUERDO */}
-            <div style={{ textAlign: 'left', width: '25%' }}>
-              <span style={{ fontSize: '10px', color: '#aaa', fontWeight: 'bold', letterSpacing: '1px' }}>◀ ESQUERDA</span><br/>
-              <span style={{ fontSize: '24px', fontWeight: 'bold', color: '#3b82f6' }}>
-                {repsFeitasEsq} <span style={{ fontSize: '14px', color: '#fff' }}>/ {configClinica.repsEsquerda}</span>
-              </span>
+            <div style={{ borderRight: '1px solid rgba(255,255,255,0.2)', paddingRight: '25px', textAlign: 'center' }}>
+                <div style={{ color: '#aaa', fontSize: '12px', fontWeight: 'bold', letterSpacing: '1px' }}>◀ ESQUERDA</div>
+                <div style={{ color: '#B02CA0', fontSize: '36px', fontWeight: 'bold' }}>{repsFeitasEsq} <span style={{fontSize:'18px', color:'#888'}}>/ {configClinica.repsEsquerda}</span></div>
             </div>
 
-            {/* CENTRO: SÉRIE E ESTADO */}
-            <div style={{ textAlign: 'center', width: '50%', borderLeft: '1px solid #444', borderRight: '1px solid #444', padding: '0 10px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'center' }}>
-                  <div>
-                      <span style={{ fontSize: '10px', color: '#aaa', fontWeight: 'bold', letterSpacing: '1px' }}>SÉRIE</span><br/>
-                      <span style={{ fontSize: '18px', fontWeight: 'bold' }}>{serieAtual} <span style={{ fontSize: '12px', color: '#888' }}>/ {configClinica.seriesTotais}</span></span>
-                  </div>
-                  <div>
-                      <span style={{ fontSize: '10px', color: '#aaa', fontWeight: 'bold', letterSpacing: '1px' }}>ESTADO</span><br/>
-                      <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#ea580c', textTransform: 'uppercase' }}>{estadoMovimento}</span>
-                  </div>
-              </div>
+            <div style={{ borderRight: '1px solid rgba(255,255,255,0.2)', paddingRight: '25px', textAlign: 'center' }}>
+                <div style={{ color: '#aaa', fontSize: '12px', fontWeight: 'bold', letterSpacing: '1px' }}>DIREITA ▶</div>
+                <div style={{ color: '#D9BB4E', fontSize: '36px', fontWeight: 'bold' }}>{repsFeitasDir} <span style={{fontSize:'18px', color:'#888'}}>/ {configClinica.repsDireita}</span></div>
             </div>
 
-            {/* LADO DIREITO */}
-            <div style={{ textAlign: 'right', width: '25%' }}>
-              <span style={{ fontSize: '10px', color: '#aaa', fontWeight: 'bold', letterSpacing: '1px' }}>DIREITA ▶</span><br/>
-              <span style={{ fontSize: '24px', fontWeight: 'bold', color: '#a855f7' }}>
-                {repsFeitasDir} <span style={{ fontSize: '14px', color: '#fff' }}>/ {configClinica.repsDireita}</span>
-              </span>
-              {/* O SENSOR EM TEMPO REAL ATUALIZADO */}
-              <div style={{ marginTop: '5px', fontSize: '11px', color: '#fbbf24' }}>
-                Abertura Atual: {distanciaAtual} cm
-              </div>
+            <div style={{ textAlign: 'center', minWidth: '160px', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                <div style={{ color: '#aaa', fontSize: '12px', fontWeight: 'bold', letterSpacing: '1px' }}>ESTADO</div>
+                <div style={{ color: estadoMovimento.includes("POSTURA") ? "#ef4444" : "#ea580c", fontSize: '20px', fontWeight: 'bold', marginTop: '5px', textTransform: 'uppercase' }}>
+                    {estadoMovimento}
+                </div>
+                <div style={{ color: '#fbbf24', fontSize: '13px', marginTop: '6px', fontWeight: 'bold' }}>Espaço atual entre as pernas: {distanciaAtual} cm</div>
             </div>
-
-          </div>
-
-          {/* Barra de Progresso Dinâmica (Total da Série) */}
-          <div style={{ width: '100%', height: '8px', backgroundColor: '#333', borderRadius: '4px', overflow: 'hidden', border: '1px solid #000' }}>
-            <div style={{ 
-                width: `${((repsFeitasEsq + repsFeitasDir) / (configClinica.repsEsquerda + configClinica.repsDireita)) * 100}%`, 
-                height: '100%', 
-                backgroundColor: '#22c55e', 
-                transition: 'width 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
-                boxShadow: '0 0 10px rgba(34, 197, 94, 0.5)'
-            }} />
-          </div>
         </div>
       )}
 
-      {/* ========================================== */}
-      {/* CAMADA 4: MENU DE PAUSA (Sobreposto a tudo) */}
-      {/* ========================================== */}
-      {menuAberto && (
-        <div style={{ 
-            position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', 
-            backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 50, 
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            backdropFilter: 'blur(5px)'
-        }}>
-          <h2 style={{ color: 'white', fontSize: '2.5rem', marginBottom: '30px' }}>⏸️ Exercício Pausado</h2>
+      {/* OVERLAY DE INÍCIO */}
+      {!exercicioIniciado && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0, 0, 0, 0.8)', zIndex: 15, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', backdropFilter: 'blur(5px)' }}>
+            <div style={{ fontSize: '80px', marginBottom: '10px' }}>🙋🏽‍♀️</div>
+            <h2 style={{ color: 'white', margin: '0 0 20px 0', textAlign: 'center', fontSize: '2.5rem' }}>Vamos Começar? <br/>Levante sua mão esquerda</h2>
+            <div style={{ width: '400px', height: '20px', backgroundColor: '#444', borderRadius: '10px', overflow: 'hidden', border: '2px solid white' }}>
+                <div style={{ width: `${Math.min(progressoInicio, 100)}%`, height: '100%', backgroundColor: '#67B5A2', transition: 'width 0.1s linear' }} />
+            </div>
+            <button onClick={() => setExercicioIniciado(true)} style={{ marginTop: '30px', padding: '10px 25px', backgroundColor: 'transparent', color: 'white', border: '1px solid #888', borderRadius: '6px', cursor: 'pointer' }}>Ou... Clique aqui para iniciar!</button>
+        </div>
+      )}
+
+      {/* OVERLAY DE DESCANSO */}
+      {exercicioIniciado && isResting && relatorioFinal.length === 0 && !menuAberto && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0, 0, 0, 0.85)', zIndex: 35, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', backdropFilter: 'blur(8px)' }}>
+            <div style={{ fontSize: '80px', marginBottom: '10px' }}>⏳</div>
+            <h2 style={{ color: '#67B5A2', fontSize: '3rem', margin: 0, textShadow: '2px 2px 4px black' }}>DESCANSO</h2>
+            <p style={{ color: 'white', fontSize: '8rem', fontWeight: 'bold', margin: '10px 0', textShadow: '0px 5px 15px rgba(0,0,0,0.8)' }}>{tempoDescansoVisual}</p>
+            
+            <div style={{ marginTop: '20px', backgroundColor: 'rgba(255,255,255,0.08)', padding: '20px 50px', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.2)', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <span style={{ fontSize: '50px', marginBottom: '10px' }}>✋🏽</span>
+                <p style={{ color: '#ddd', fontSize: '1.2rem', margin: '0 0 15px 0', textAlign: 'center' }}>Mão Esquerda<br/><b style={{color: '#67B5A2'}}>REPETIR PAUSA</b></p>
+                <div style={{ width: '150px', height: '12px', backgroundColor: '#333', borderRadius: '6px', overflow: 'hidden' }}>
+                    <div style={{ width: `${progressoEsq}%`, height: '100%', backgroundColor: '#67B5A2', transition: 'width 0.1s linear' }} />
+                </div>
+            </div>
+        </div>
+      )}
+
+      {/* MENU DE PAUSA MANUAL */}
+      {menuAberto && relatorioFinal.length === 0 && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 50, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(10px)' }}>
+          <h2 style={{ color: 'white', fontSize: '3rem', marginBottom: '40px', letterSpacing: '2px' }}>EXERCÍCIO PAUSADO</h2>
           
-          <div style={{ display: 'flex', gap: '20px' }}>
-            <button 
-              onClick={() => setMenuAberto(false)} 
-              style={{ padding: '15px 30px', fontSize: '1.2rem', backgroundColor: '#22c55e', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>
-              ▶️ Continuar Treino
-            </button>
-            
-            <button 
-              onClick={() => {
-                setMenuAberto(false);
-                setExercicioIniciado(false);
-              }} 
-              style={{ padding: '15px 30px', fontSize: '1.2rem', backgroundColor: '#ef4444', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>
-              🛑 Encerrar Sessão
-            </button>
+          <div style={{ display: 'flex', gap: '60px' }}>
+             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', backgroundColor: 'rgba(34, 197, 94, 0.1)', padding: '30px', borderRadius: '20px', border: '2px solid #22c55e' }}>
+                <span style={{ fontSize: '60px', marginBottom: '15px' }}>✋🏽</span>
+                <p style={{ color: 'white', fontSize: '1.5rem', margin: '0 0 20px 0', fontWeight: 'bold' }}>Continuar Treino</p>
+                <div style={{ width: '200px', height: '15px', backgroundColor: '#333', borderRadius: '8px', overflow: 'hidden' }}>
+                    <div style={{ width: `${progressoEsq}%`, height: '100%', backgroundColor: '#22c55e', transition: 'width 0.1s linear' }} />
+                </div>
+             </div>
+
+             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', backgroundColor: 'rgba(239, 68, 68, 0.1)', padding: '30px', borderRadius: '20px', border: '2px solid #ef4444' }}>
+                <span style={{ fontSize: '60px', marginBottom: '15px' }}>🤚🏽</span>
+                <p style={{ color: 'white', fontSize: '1.5rem', margin: '0 0 20px 0', fontWeight: 'bold' }}>Encerrar Sessão</p>
+                <div style={{ width: '200px', height: '15px', backgroundColor: '#333', borderRadius: '8px', overflow: 'hidden' }}>
+                    <div style={{ width: `${progressoDir}%`, height: '100%', backgroundColor: '#ef4444', transition: 'width 0.1s linear' }} />
+                </div>
+             </div>
           </div>
         </div>
       )}
-    
+
+      {/* POPUP DE RELATÓRIO FINAL */}
+      {relatorioFinal.length > 0 && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0, 0, 0, 0.85)', zIndex: 60, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', backdropFilter: 'blur(8px)' }}>
+            <div style={{ backgroundColor: '#67807eb9', padding: '40px', borderRadius: '20px', border: '4px solid #67B5A2', width: '80%', maxWidth: '800px', display: 'flex', flexDirection: 'column', alignItems: 'center', boxShadow: '0 20px 50px #444E4D' }}>
+                <h2 style={{ color: 'white', fontSize: '3rem', margin: '0 0 5px 0' }}>Parabéns! Sessão Concluída com Sucesso!</h2>
+                <p style={{ color: 'white', marginBottom: '30px', fontSize: '1.2rem' }}>Aqui está o resumo de performance da sua sessão:</p>
+
+                <table style={{ width: '100%', color: 'white', borderCollapse: 'collapse', textAlign: 'center', marginBottom: '40px', fontSize: '1.1rem' }}>
+                    <thead>
+                        <tr style={{ borderBottom: '3px solid #444', backgroundColor: '#333' }}>
+                            <th style={{ padding: '20px' }}>Número da Série</th>
+                            <th style={{ padding: '20px', color: '#22c55e' }}>Repetições Realizadas Corretamente</th>
+                            <th style={{ padding: '20px', color: '#ef4444' }}>Excedeu Distância Meta</th>
+                            <th style={{ padding: '20px', color: '#f59e0b' }}>Postura</th>
+                            <th style={{ padding: '20px', color: '#3b82f6' }}>Acurácia</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {relatorioFinal.map((r, i) => {
+                            const totalReps = r.corretas + r.incorretas;
+                            const acuracia = totalReps > 0 ? Math.round((r.corretas / totalReps) * 100) : 0;
+
+                            return (
+                                <tr key={i} style={{ borderBottom: '1px solid #333', backgroundColor: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.03)' }}>
+                                    <td style={{ padding: '20px', fontWeight: 'bold' }}>{r.serie}</td>
+                                    <td style={{ padding: '20px', fontWeight: 'bold', fontSize: '1.5rem', color: '#22c55e' }}>{r.corretas}</td>
+                                    <td style={{ padding: '20px', fontSize: '1.3rem' }}>{r.incorretas}</td>
+                                    <td style={{ padding: '20px', fontSize: '1.3rem' }}>{r.compensacoes}</td>
+                                    <td style={{ padding: '20px', fontWeight: 'bold', fontSize: '1.5rem', color: '#3b82f6' }}>{acuracia}%</td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+                <button onClick={() => window.location.reload()} style={{ padding: '20px 50px', fontSize: '1.5rem', backgroundColor: '#67B5A2', color: 'white', border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 'bold', boxShadow: '0 10px 20px #444E4D' }}>
+                    Voltar ao Menu Inicial
+                </button>
+            </div>
+        </div>
+      )}
+
     </div>
   );
 }
